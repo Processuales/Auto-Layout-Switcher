@@ -1,7 +1,6 @@
 @tool
 extends EditorPlugin
 
-# Editor Settings keys
 const ES_PREFIX := "auto_layout_switcher/"
 const KEY_2D := ES_PREFIX + "layout_for_2d"
 const KEY_3D := ES_PREFIX + "layout_for_3d"
@@ -10,7 +9,6 @@ const KEY_ASSETLIB := ES_PREFIX + "layout_for_assetlib"
 const KEY_SCRIPT := ES_PREFIX + "layout_for_script"
 const KEY_FALLBACK := ES_PREFIX + "layout_fallback"
 
-# Defaults
 const DEF_2D := "Default"
 const DEF_3D := "Default"
 const DEF_GAME := "Default"
@@ -34,10 +32,8 @@ var _hint_cached := ""
 func _enter_tree() -> void:
 	_settings = get_editor_interface().get_editor_settings()
 	_register_editor_settings()
-
 	if not main_screen_changed.is_connected(_on_main_screen_changed):
 		main_screen_changed.connect(_on_main_screen_changed)
-
 	await get_tree().process_frame
 	_find_layouts_menu()
 	_connect_menu_refresh()
@@ -53,7 +49,15 @@ func _exit_tree() -> void:
 		if _layouts_menu.id_pressed.is_connected(_on_layouts_menu_activated):
 			_layouts_menu.id_pressed.disconnect(_on_layouts_menu_activated)
 
-# Editor Settings
+# ---------- Settings helpers ----------
+
+func _settings_notify() -> void:
+	if not _settings:
+		return
+	if _settings.has_method("notify_property_list_changed"):
+		_settings.notify_property_list_changed()
+	elif _settings.has_method("property_list_changed_notify"):
+		_settings.property_list_changed_notify()
 
 func _es_get_str(key: String, def: String) -> String:
 	if _settings and _settings.has_setting(key):
@@ -76,14 +80,14 @@ func _register_editor_settings() -> void:
 		_settings.add_property_info({
 			"name": p["key"],
 			"type": TYPE_STRING,
-			"hint": PROPERTY_HINT_NONE,
-			"hint_string": ""
+			"hint": PROPERTY_HINT_ENUM_SUGGESTION,  # suggestions visible even if menu is empty
+			"hint_string": "Default"
 		})
 		if not _settings.has_setting(p["key"]):
 			_settings.set_setting(p["key"], p["def"])
-	_settings.property_list_changed_notify()
+	_settings_notify()
 
-# Main signal
+# ---------- Main signal ----------
 
 func _on_main_screen_changed(screen_name: String) -> void:
 	if _applying:
@@ -92,15 +96,14 @@ func _on_main_screen_changed(screen_name: String) -> void:
 		return
 	_last_screen = screen_name
 	_log("[AutoLayout] screen -> %s" % screen_name)
-
-	var target := _layout_for(screen_name)
-	if target.is_empty():
+	var wanted := _layout_for(screen_name)
+	if wanted.is_empty():
 		return
-	if _applied_layout == target:
+	if _applied_layout == wanted:
 		return
-	_apply_layout_by_name(target)
+	_apply_layout_by_name(wanted)
 
-# Selection
+# ---------- Selection ----------
 
 func _layout_for(screen_name: String) -> String:
 	match screen_name.to_lower():
@@ -111,7 +114,7 @@ func _layout_for(screen_name: String) -> String:
 		"script":  return _es_get_str(KEY_SCRIPT, DEF_SCRIPT)
 		_:         return _es_get_str(KEY_FALLBACK, DEF_FALLBACK)
 
-# Apply
+# ---------- Apply ----------
 
 func _apply_for_current() -> void:
 	var se := get_editor_interface().get_script_editor()
@@ -124,37 +127,57 @@ func _apply_for_current() -> void:
 		if t != "" and _applied_layout != t:
 			_apply_layout_by_name(t)
 
+func _pick_valid_layout(preferred: String) -> String:
+	if _name_to_id.has(preferred):
+		return preferred
+	if _name_to_id.has("Default"):
+		return "Default"
+	for k in _name_to_id.keys():
+		var s := str(k).strip_edges()
+		if s != "":
+			return s
+	return ""
+
 func _apply_layout_by_name(layout_name: String) -> void:
 	if layout_name.is_empty():
 		return
-	if _applied_layout == layout_name:
+	var valid := _pick_valid_layout(layout_name)
+	if valid.is_empty():
+		_log("[AutoLayout] No valid layout to apply.")
 		return
 
 	if _layouts_menu == null or not is_instance_valid(_layouts_menu):
 		_find_layouts_menu()
 		_connect_menu_refresh()
 		if _layouts_menu == null:
-			printerr("[AutoLayout] Layout menu not available. Cannot apply: %s" % layout_name)
+			printerr("[AutoLayout] Layout menu not available. Cannot apply: %s" % valid)
 			return
 
-	if not _name_to_id.has(layout_name):
+	if not _name_to_id.has(valid):
 		_refresh_layout_cache()
-	if not _name_to_id.has(layout_name):
-		printerr("[AutoLayout] Layout '%s' not found. Available: %s" % [layout_name, str(_name_to_id.keys())])
+	if not _name_to_id.has(valid):
+		printerr("[AutoLayout] Layout '%s' not found. Known: %s" % [valid, str(_name_to_id.keys())])
 		return
 
-	var id := int(_name_to_id[layout_name])
-	_log("[AutoLayout] applying layout: %s (id=%d)" % [layout_name, id])
+	var id := int(_name_to_id[valid])
+	_log("[AutoLayout] applying layout: %s (id=%d)" % [valid, id])
 
 	_applying = true
 	if is_instance_valid(_layouts_menu):
 		_layouts_menu.id_pressed.emit(id)
 	_applying = false
 
-	_applied_layout = layout_name
+	_applied_layout = valid
 	_throttled_save()
 
-# Menu setup
+	# Neutralize stale file paths that layouts may try to navigate to
+	var ei := get_editor_interface()
+	if ei and ei.has_method("get_file_system_dock"):
+		var fsd := ei.get_file_system_dock()
+		if fsd and fsd.has_method("navigate_to_path"):
+			fsd.call_deferred("navigate_to_path", "res://")
+
+# ---------- Menu setup ----------
 
 func _find_layouts_menu() -> void:
 	if _layouts_menu and is_instance_valid(_layouts_menu):
@@ -169,7 +192,7 @@ func _find_layouts_menu() -> void:
 			_layouts_menu = pm
 			break
 	if _layouts_menu == null:
-		printerr("[AutoLayout] Could not find 'Editor Layouts' menu. Open the Editor menu once, then toggle the plugin.")
+		_log("[AutoLayout] Layouts menu not found yet.")
 	else:
 		_log("[AutoLayout] Found layouts menu: %s" % _layouts_menu.name)
 
@@ -195,7 +218,7 @@ func _on_layouts_menu_activated(id: int) -> void:
 		_applied_layout = label
 		_log("[AutoLayout] user applied layout -> %s" % _applied_layout)
 
-# Menu scan
+# ---------- Menu scan ----------
 
 func _find_popup_by_name(node: Node, wanted: String, descend_into_items: bool, tolerant: bool) -> PopupMenu:
 	if node == null:
@@ -233,67 +256,76 @@ func _looks_like_layouts_menu(pm: PopupMenu) -> bool:
 		return false
 	return sep_idx < pm.item_count - 1
 
-# Cache and save
+# ---------- Cache and save ----------
 
 func _refresh_layout_cache() -> void:
 	_name_to_id.clear()
-	if _layouts_menu == null:
-		return
-	var sep_idx := -1
-	for i in range(_layouts_menu.item_count):
-		if _layouts_menu.is_item_separator(i):
-			sep_idx = i
-			break
-	if sep_idx == -1:
-		return
-	for j in range(sep_idx + 1, _layouts_menu.item_count):
-		if _layouts_menu.is_item_separator(j):
-			continue
-		var label := _layouts_menu.get_item_text(j).strip_edges()
-		if label.is_empty():
-			continue
-		var id := _layouts_menu.get_item_id(j)
-		_name_to_id[label] = id
+	if _layouts_menu != null:
+		var sep_idx := -1
+		for i in range(_layouts_menu.item_count):
+			if _layouts_menu.is_item_separator(i):
+				sep_idx = i
+				break
+		if sep_idx != -1:
+			for j in range(sep_idx + 1, _layouts_menu.item_count):
+				if _layouts_menu.is_item_separator(j):
+					continue
+				var label := _layouts_menu.get_item_text(j).strip_edges()
+				if label.is_empty():
+					continue
+				var id := _layouts_menu.get_item_id(j)
+				_name_to_id[label] = id
 	_log("[AutoLayout] cached layouts: %s" % str(_name_to_id.keys()))
-	_seed_settings_if_empty()
+	_seed_settings_if_needed()
 	_update_setting_hints()
 
-func _seed_settings_if_empty() -> void:
-	if _name_to_id.is_empty():
-		return
-	var first: String = ""
-	for k in _name_to_id.keys():
-		var s := str(k).strip_edges()
-		if s != "":
-			first = s
-			break
-	if first == "":
+func _seed_settings_if_needed() -> void:
+	# Prefer "Default" if present, else the first non-empty discovered; never overwrite valid values.
+	var preferred := ""
+	if _name_to_id.has("Default"):
+		preferred = "Default"
+	else:
+		for k in _name_to_id.keys():
+			var s := str(k).strip_edges()
+			if s != "":
+				preferred = s
+				break
+	if preferred == "":
+		_settings_notify()
 		return
 	for key in [KEY_2D, KEY_3D, KEY_GAME, KEY_ASSETLIB, KEY_SCRIPT, KEY_FALLBACK]:
 		var val := _es_get_str(key, "")
 		if val == "" or not _name_to_id.has(val):
-			_settings.set_setting(key, first)
-	_settings.property_list_changed_notify()
+			_settings.set_setting(key, preferred)
+	_settings_notify()
 
 func _update_setting_hints() -> void:
+	# Strict enum when we have real names, suggestion list otherwise.
 	var names := PackedStringArray()
 	for k in _name_to_id.keys():
 		var s := str(k).strip_edges()
 		if s != "":
 			names.push_back(s)
 	names.sort()
-	var hint := _join_strings(names, ",")
-	if hint == _hint_cached:
+
+	var hint_type := PROPERTY_HINT_ENUM_SUGGESTION
+	var hint_string := "Default"
+	if names.size() > 0:
+		hint_type = PROPERTY_HINT_ENUM
+		hint_string = _join_strings(names, ",")
+
+	if hint_string == _hint_cached and hint_type == PROPERTY_HINT_ENUM:
 		return
-	_hint_cached = hint
+	_hint_cached = hint_string
+
 	for key in [KEY_2D, KEY_3D, KEY_GAME, KEY_ASSETLIB, KEY_SCRIPT, KEY_FALLBACK]:
 		_settings.add_property_info({
 			"name": key,
 			"type": TYPE_STRING,
-			"hint": PROPERTY_HINT_ENUM,
-			"hint_string": hint
+			"hint": hint_type,
+			"hint_string": hint_string
 		})
-	_settings.property_list_changed_notify()
+	_settings_notify()
 
 func _join_strings(arr: PackedStringArray, sep: String) -> String:
 	var out := ""
