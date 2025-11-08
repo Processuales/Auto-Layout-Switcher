@@ -1,4 +1,4 @@
-# Auto-Layout-Switcher
+# Auto Layout Switcher
 The Auto Layout Switcher is a Godot plugin that automatically switches Editor Layours depending on the current screen (2D, 3D, Script, Game, AssetLib).
 For example, you can change the layout when in Script view so that the code editor has more space.
 
